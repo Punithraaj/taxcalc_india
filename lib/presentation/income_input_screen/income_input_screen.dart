@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:sizer/sizer.dart';
 
 import '../../core/app_export.dart';
+import '../../services/tax_data_manager.dart';
 import './widgets/capital_gains_selector.dart';
 import './widgets/city_tier_selector.dart';
 import './widgets/income_category_header.dart';
@@ -21,29 +22,13 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
   bool _isMonthly = true;
   String _selectedCityTier = 'metro';
   String _selectedCapitalGainsType = 'short_term_normal';
+  int _currentProfileId = 1;
+  bool _isLoading = true;
+
+  final TaxDataManager _dataManager = TaxDataManager();
 
   // Income data storage
-  final Map<String, Map<String, String>> _incomeData = {
-    'salary': {
-      'basic_da': '',
-      'hra': '',
-      'bonus': '',
-      'other_allowances': '',
-    },
-    'business': {
-      'business_income': '',
-      'professional_income': '',
-      'other_business': '',
-    },
-    'capital_gains': {
-      'capital_gains_amount': '',
-    },
-    'other_sources': {
-      'savings_interest': '',
-      'fixed_deposits': '',
-      'other_income': '',
-    },
-  };
+  Map<String, Map<String, String>> _incomeData = {};
 
   final List<Map<String, dynamic>> _incomeCategories = [
     {
@@ -132,6 +117,34 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
     super.initState();
     _tabController =
         TabController(length: _incomeCategories.length, vsync: this);
+    _initializeData();
+  }
+
+  Future<void> _initializeData() async {
+    try {
+      // Get current profile ID from arguments or data manager
+      final args =
+          ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+      _currentProfileId =
+          args?['profileId'] ?? await _dataManager.getCurrentProfile();
+
+      // Load saved data
+      _incomeData = await _dataManager.loadIncomeData(_currentProfileId);
+      final settings = await _dataManager.loadIncomeSettings(_currentProfileId);
+
+      setState(() {
+        _isMonthly = settings['is_monthly'] ?? true;
+        _selectedCityTier = settings['selected_city_tier'] ?? 'metro';
+        _selectedCapitalGainsType =
+            settings['selected_capital_gains_type'] ?? 'short_term_normal';
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+      });
+      _showErrorMessage('Failed to load saved data');
+    }
   }
 
   @override
@@ -144,6 +157,9 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
     setState(() {
       _incomeData[category]?[fieldKey] = value;
     });
+
+    // Auto-save data after a brief delay
+    _autoSaveData();
   }
 
   void _onToggleChanged(bool isMonthly) {
@@ -152,6 +168,8 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
       // Convert existing values
       _convertAllValues();
     });
+
+    _saveSettings();
   }
 
   void _convertAllValues() {
@@ -167,6 +185,27 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
           }
         }
       }
+    }
+  }
+
+  Future<void> _autoSaveData() async {
+    try {
+      await _dataManager.saveIncomeData(_currentProfileId, _incomeData);
+    } catch (e) {
+      // Silent fail for auto-save
+    }
+  }
+
+  Future<void> _saveSettings() async {
+    try {
+      final settings = {
+        'is_monthly': _isMonthly,
+        'selected_city_tier': _selectedCityTier,
+        'selected_capital_gains_type': _selectedCapitalGainsType,
+      };
+      await _dataManager.saveIncomeSettings(_currentProfileId, settings);
+    } catch (e) {
+      // Silent fail for settings save
     }
   }
 
@@ -230,14 +269,25 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
     return 112500 + (income - 1000000) * 0.30;
   }
 
-  void _saveAndContinue() {
-    // Auto-save functionality
-    _showSaveConfirmation();
+  Future<void> _saveAndContinue() async {
+    try {
+      // Save all data
+      await _dataManager.saveIncomeData(_currentProfileId, _incomeData);
+      await _saveSettings();
 
-    // Navigate to deductions screen
-    Future.delayed(const Duration(seconds: 1), () {
-      Navigator.pushNamed(context, '/deductions-input-screen');
-    });
+      _showSaveConfirmation();
+
+      // Navigate to deductions screen
+      Future.delayed(const Duration(seconds: 1), () {
+        Navigator.pushNamed(
+          context,
+          '/deductions-input-screen',
+          arguments: {'profileId': _currentProfileId},
+        );
+      });
+    } catch (e) {
+      _showErrorMessage('Failed to save data. Please try again.');
+    }
   }
 
   void _showSaveConfirmation() {
@@ -262,8 +312,40 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
     );
   }
 
+  void _showErrorMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            CustomIconWidget(
+              iconName: 'error',
+              color: Colors.white,
+              size: 20,
+            ),
+            SizedBox(width: 2.w),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: AppTheme.lightTheme.colorScheme.error,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return Scaffold(
+        backgroundColor: AppTheme.lightTheme.scaffoldBackgroundColor,
+        body: Center(
+          child: CircularProgressIndicator(
+            color: AppTheme.lightTheme.colorScheme.primary,
+          ),
+        ),
+      );
+    }
+
     double totalIncome = _calculateTotalIncome();
     double estimatedTax = _calculateEstimatedTax(totalIncome);
 
@@ -401,6 +483,7 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
             setState(() {
               _selectedCityTier = tier;
             });
+            _saveSettings();
           },
         );
       case 'capital_gains':
@@ -410,6 +493,7 @@ class _IncomeInputScreenState extends State<IncomeInputScreen>
             setState(() {
               _selectedCapitalGainsType = type;
             });
+            _saveSettings();
           },
         );
       default:

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:sizer/sizer.dart';
 
 import '../../core/app_export.dart';
+import '../../services/tax_data_manager.dart';
 import './widgets/empty_state_widget.dart';
 import './widgets/profile_card_widget.dart';
 import './widgets/profile_creation_dialog.dart';
@@ -14,53 +15,68 @@ class ProfileSelectionScreen extends StatefulWidget {
 }
 
 class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
-  bool _isLoading = false;
+  bool _isLoading = true;
   bool _isRefreshing = false;
+  final TaxDataManager _dataManager = TaxDataManager();
 
-  // Mock data for tax profiles
-  List<Map<String, dynamic>> _profiles = [
-    {
-      "id": 1,
-      "name": "Rajesh Kumar",
-      "avatar":
-          "https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=150&h=150&fit=crop&crop=face",
-      "lastCalculatedYear": "2024-25",
-      "taxRegime": "New Regime",
-      "totalIncome": 1200000.0,
-      "taxPayable": 78000.0,
-      "lastModified": DateTime.now().subtract(Duration(days: 2)),
-      "isDefault": true,
-      "isSynced": true,
-    },
-    {
-      "id": 2,
-      "name": "Priya Sharma",
-      "avatar":
-          "https://images.unsplash.com/photo-1494790108755-2616b612b786?w=150&h=150&fit=crop&crop=face",
-      "lastCalculatedYear": "2024-25",
-      "taxRegime": "Old Regime",
-      "totalIncome": 850000.0,
-      "taxPayable": 45000.0,
-      "lastModified": DateTime.now().subtract(Duration(days: 5)),
-      "isDefault": false,
-      "isSynced": true,
-    },
-    {
-      "id": 3,
-      "name": "Family Tax Profile",
-      "avatar": null,
-      "lastCalculatedYear": "2023-24",
-      "taxRegime": "New Regime",
-      "totalIncome": 2500000.0,
-      "taxPayable": 312500.0,
-      "lastModified": DateTime.now().subtract(Duration(days: 15)),
-      "isDefault": false,
-      "isSynced": false,
-    },
-  ];
+  // Profiles list
+  List<Map<String, dynamic>> _profiles = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfiles();
+  }
+
+  Future<void> _loadProfiles() async {
+    try {
+      final profiles = await _dataManager.loadProfiles();
+      setState(() {
+        _profiles = profiles;
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+      });
+      _showErrorMessage('Failed to load profiles');
+    }
+  }
+
+  void _showErrorMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            CustomIconWidget(
+              iconName: 'error',
+              color: Colors.white,
+              size: 20,
+            ),
+            SizedBox(width: 2.w),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: AppTheme.lightTheme.colorScheme.error,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return Scaffold(
+        backgroundColor: AppTheme.lightTheme.scaffoldBackgroundColor,
+        body: Center(
+          child: CircularProgressIndicator(
+            color: AppTheme.lightTheme.colorScheme.primary,
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: AppTheme.lightTheme.scaffoldBackgroundColor,
       drawer: _buildDrawer(),
@@ -222,7 +238,7 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
       onRefresh: _refreshProfiles,
       child: Column(
         children: [
-          if (_isLoading)
+          if (_isRefreshing)
             LinearProgressIndicator(
               backgroundColor: AppTheme.lightTheme.colorScheme.surface,
               valueColor: AlwaysStoppedAnimation<Color>(
@@ -273,32 +289,44 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
       _isRefreshing = true;
     });
 
-    // Simulate API call
-    await Future.delayed(Duration(seconds: 1));
+    try {
+      await _loadProfiles();
+      setState(() {
+        _isRefreshing = false;
+        // Update sync status
+        for (var profile in _profiles) {
+          profile['isSynced'] = true;
+        }
+      });
 
-    setState(() {
-      _isRefreshing = false;
-      // Update sync status
-      for (var profile in _profiles) {
-        profile['isSynced'] = true;
-      }
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Profiles synced successfully'),
-        backgroundColor: AppTheme.lightTheme.primaryColor,
-      ),
-    );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Profiles synced successfully'),
+          backgroundColor: AppTheme.lightTheme.primaryColor,
+        ),
+      );
+    } catch (e) {
+      setState(() {
+        _isRefreshing = false;
+      });
+      _showErrorMessage('Failed to sync profiles');
+    }
   }
 
-  void _selectProfile(Map<String, dynamic> profile) {
-    // Navigate to main dashboard with selected profile
-    Navigator.pushNamed(
-      context,
-      '/main-dashboard',
-      arguments: {'profileId': profile['id']},
-    );
+  Future<void> _selectProfile(Map<String, dynamic> profile) async {
+    try {
+      // Set the current profile
+      await _dataManager.setCurrentProfile(profile['id']);
+
+      // Navigate to main dashboard with selected profile
+      Navigator.pushNamed(
+        context,
+        '/main-dashboard',
+        arguments: {'profileId': profile['id']},
+      );
+    } catch (e) {
+      _showErrorMessage('Failed to select profile');
+    }
   }
 
   void _showCreateProfileDialog() {
@@ -310,10 +338,15 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
     );
   }
 
-  void _createProfile(String name, String? avatarUrl) {
-    setState(() {
-      _profiles.add({
-        "id": _profiles.length + 1,
+  Future<void> _createProfile(String name, String? avatarUrl) async {
+    try {
+      final newProfile = {
+        "id": _profiles.isNotEmpty
+            ? _profiles
+                    .map((p) => p['id'] as int)
+                    .reduce((a, b) => a > b ? a : b) +
+                1
+            : 1,
         "name": name,
         "avatar": avatarUrl,
         "lastCalculatedYear": "2024-25",
@@ -323,37 +356,61 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
         "lastModified": DateTime.now(),
         "isDefault": _profiles.isEmpty,
         "isSynced": false,
-      });
-    });
+      };
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Profile "$name" created successfully'),
-        backgroundColor: AppTheme.lightTheme.primaryColor,
-      ),
-    );
+      setState(() {
+        _profiles.add(newProfile);
+      });
+
+      // Save to persistent storage
+      await _dataManager.saveProfiles(_profiles);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Profile "$name" created successfully'),
+          backgroundColor: AppTheme.lightTheme.primaryColor,
+        ),
+      );
+    } catch (e) {
+      _showErrorMessage('Failed to create profile');
+    }
   }
 
-  void _duplicateProfile(Map<String, dynamic> profile) {
-    setState(() {
+  Future<void> _duplicateProfile(Map<String, dynamic> profile) async {
+    try {
       final duplicatedProfile = Map<String, dynamic>.from(profile);
-      duplicatedProfile['id'] = _profiles.length + 1;
+      duplicatedProfile['id'] =
+          _profiles.map((p) => p['id'] as int).reduce((a, b) => a > b ? a : b) +
+              1;
       duplicatedProfile['name'] = '${profile['name']} (Copy)';
       duplicatedProfile['isDefault'] = false;
       duplicatedProfile['isSynced'] = false;
       duplicatedProfile['lastModified'] = DateTime.now();
-      _profiles.add(duplicatedProfile);
-    });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Profile duplicated successfully'),
-        backgroundColor: AppTheme.lightTheme.primaryColor,
-      ),
-    );
+      setState(() {
+        _profiles.add(duplicatedProfile);
+      });
+
+      // Copy profile data
+      final originalData = await _dataManager.exportProfileData(profile['id']);
+      await _dataManager.importProfileData(
+          duplicatedProfile['id'], originalData);
+
+      // Save to persistent storage
+      await _dataManager.saveProfiles(_profiles);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Profile duplicated successfully'),
+          backgroundColor: AppTheme.lightTheme.primaryColor,
+        ),
+      );
+    } catch (e) {
+      _showErrorMessage('Failed to duplicate profile');
+    }
   }
 
-  void _renameProfile(Map<String, dynamic> profile) {
+  Future<void> _renameProfile(Map<String, dynamic> profile) async {
     final TextEditingController controller =
         TextEditingController(text: profile['name']);
 
@@ -375,20 +432,29 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
             child: Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               if (controller.text.trim().isNotEmpty) {
-                setState(() {
-                  profile['name'] = controller.text.trim();
-                  profile['lastModified'] = DateTime.now();
-                  profile['isSynced'] = false;
-                });
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Profile renamed successfully'),
-                    backgroundColor: AppTheme.lightTheme.primaryColor,
-                  ),
-                );
+                try {
+                  setState(() {
+                    profile['name'] = controller.text.trim();
+                    profile['lastModified'] = DateTime.now();
+                    profile['isSynced'] = false;
+                  });
+
+                  // Save to persistent storage
+                  await _dataManager.saveProfiles(_profiles);
+
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Profile renamed successfully'),
+                      backgroundColor: AppTheme.lightTheme.primaryColor,
+                    ),
+                  );
+                } catch (e) {
+                  Navigator.pop(context);
+                  _showErrorMessage('Failed to rename profile');
+                }
               }
             },
             child: Text('Rename'),
@@ -398,47 +464,86 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
     );
   }
 
-  void _exportProfile(Map<String, dynamic> profile) {
-    // Simulate export functionality
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Exporting "${profile['name']}" profile...'),
-        backgroundColor: AppTheme.lightTheme.primaryColor,
-        action: SnackBarAction(
-          label: 'View',
-          onPressed: () {
-            // Handle view exported file
-          },
+  Future<void> _exportProfile(Map<String, dynamic> profile) async {
+    try {
+      // Export profile data
+      final exportData = await _dataManager.exportProfileData(profile['id']);
+
+      // Show success message (in a real app, you'd trigger a file download)
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Profile "${profile['name']}" exported successfully'),
+          backgroundColor: AppTheme.lightTheme.primaryColor,
+          action: SnackBarAction(
+            label: 'View Data',
+            onPressed: () {
+              // Show export data in dialog for demonstration
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: Text('Export Data'),
+                  content: SingleChildScrollView(
+                    child: Text(exportData.toString()),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: Text('Close'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
         ),
-      ),
-    );
+      );
+    } catch (e) {
+      _showErrorMessage('Failed to export profile');
+    }
   }
 
-  void _deleteProfile(Map<String, dynamic> profile) {
-    setState(() {
-      _profiles.removeWhere((p) => p['id'] == profile['id']);
+  Future<void> _deleteProfile(Map<String, dynamic> profile) async {
+    try {
+      setState(() {
+        _profiles.removeWhere((p) => p['id'] == profile['id']);
 
-      // If deleted profile was default, make first profile default
-      if (profile['isDefault'] == true && _profiles.isNotEmpty) {
-        _profiles.first['isDefault'] = true;
-      }
-    });
+        // If deleted profile was default, make first profile default
+        if (profile['isDefault'] == true && _profiles.isNotEmpty) {
+          _profiles.first['isDefault'] = true;
+        }
+      });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Profile "${profile['name']}" deleted'),
-        backgroundColor: AppTheme.lightTheme.colorScheme.error,
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () {
-            setState(() {
-              _profiles.add(profile);
-              _profiles
-                  .sort((a, b) => (a['id'] as int).compareTo(b['id'] as int));
-            });
-          },
+      // Clear profile data from storage
+      await _dataManager.clearProfileData(profile['id']);
+
+      // Save updated profiles list
+      await _dataManager.saveProfiles(_profiles);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Profile "${profile['name']}" deleted'),
+          backgroundColor: AppTheme.lightTheme.colorScheme.error,
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () async {
+              try {
+                setState(() {
+                  _profiles.add(profile);
+                  _profiles.sort(
+                      (a, b) => (a['id'] as int).compareTo(b['id'] as int));
+                });
+
+                // Save updated profiles list
+                await _dataManager.saveProfiles(_profiles);
+              } catch (e) {
+                _showErrorMessage('Failed to restore profile');
+              }
+            },
+          ),
         ),
-      ),
-    );
+      );
+    } catch (e) {
+      _showErrorMessage('Failed to delete profile');
+    }
   }
 }
